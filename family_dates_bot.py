@@ -823,11 +823,11 @@ def build_recommendations_keyboard(
     for idx, (gift, _score) in enumerate(recommendations, start=1):
         row = [
             InlineKeyboardButton(
-                text=f"👍 Выбрать #{idx}",
+                text="👍 Выбрать подарок",
                 callback_data=f"gift_fb:{event_id}:{gift.id}:1",
             ),
             InlineKeyboardButton(
-                text=f"👎 Не подходит #{idx}",
+                text="👎 Другой подарок",
                 callback_data=f"gift_fb:{event_id}:{gift.id}:0",
             ),
         ]
@@ -1458,8 +1458,8 @@ def budget_keyboard(event_id):
     ] + [[InlineKeyboardButton(text="⬅️ К событию", callback_data=f"show_event:{event_id}")]])
 
 
-async def edit_gift_message(callback, content, keyboard):
-    if callback.message.photo:
+async def edit_gift_message(callback, content, keyboard, force_new=False):
+    if force_new or callback.message.photo:
         # Long lists do not fit Telegram photo captions. Keep the original card.
         await callback.message.answer(content, reply_markup=keyboard, disable_web_page_preview=True)
     else:
@@ -1547,14 +1547,14 @@ async def cb_recommend_gift(
             event.title, event.event_date, event.has_birth_year
         )
         recommendations = await get_smart_recommendations(
-            session, event, turning_age, limit=3
+            session, event, turning_age, limit=1
         )
 
     await callback.answer()
     await show_gift_recommendations(callback, event_id, headline, recommendations, session_maker)
 
 
-async def show_gift_recommendations(callback, event_id, headline, recommendations, session_maker=None):
+async def show_gift_recommendations(callback, event_id, headline, recommendations, session_maker=None, new_message=False):
     if not recommendations:
         await edit_gift_message(callback,
             "Все подходящие идеи с известным ориентиром стоимости закончились.\n"
@@ -1565,11 +1565,12 @@ async def show_gift_recommendations(callback, event_id, headline, recommendation
                 [InlineKeyboardButton(text="🎁 Добавить свой подарок", callback_data=f"attach_gift:{event_id}")],
                 [InlineKeyboardButton(text="⬅️ К событию", callback_data=f"show_event:{event_id}")],
             ]),
+            force_new=new_message,
         )
         return
 
     lines = [
-        f"💡 <b>Подборка подарков для события «{escape(headline)}»</b>",
+        f"💡 <b>Идея подарка для «{escape(headline)}»</b>",
         "<i>Учитываю интересы, бюджет и предыдущие отказы. Суммы — ориентиры для поиска, не проверенные цены магазинов.</i>",
         "",
     ]
@@ -1577,7 +1578,7 @@ async def show_gift_recommendations(callback, event_id, headline, recommendation
         tags_fmt = " ".join(f"#{t}" for t in (gift.tags or []))
         url_part = f"\n   🔗 <a href='{escape(gift.shop_url, quote=True)}'>Перейти в магазин</a>" if gift.shop_url else ""
         lines.append(
-            f"<b>{idx}. {escape(gift.title)}</b>\n"
+            f"🎁 <b>{escape(gift.title)}</b>\n"
             f"   📂 {escape(gift.category)} | {price_hint(gift)}\n"
             f"   🏷 {tags_fmt}{url_part}\n"
         )
@@ -1589,7 +1590,7 @@ async def show_gift_recommendations(callback, event_id, headline, recommendation
 
     kb = build_recommendations_keyboard(event_id, recommendations)
     kb.inline_keyboard.insert(0, [InlineKeyboardButton(text="💰 Бюджет", callback_data=f"gift_budget:{event_id}"), InlineKeyboardButton(text="⚙️ Интересы", callback_data=f"gift_preferences:{event_id}")])
-    await edit_gift_message(callback, "\n".join(lines), kb)
+    await edit_gift_message(callback, "\n".join(lines), kb, force_new=new_message)
     if session_maker:
         async with session_maker() as session:
             event = await get_chat_event(session, event_id, callback.message.chat.id)
@@ -1692,15 +1693,18 @@ async def cb_gift_feedback(
             )
             await callback.answer("Подарок выбран и сохранён в событие!")
         else:
-            recommendations = await get_smart_recommendations(session, event, turning_age, limit=3)
+            recommendations = await get_smart_recommendations(session, event, turning_age, limit=1)
             headline, _ = format_event_headline(event.title, event.event_date, event.has_birth_year)
             await callback.answer("Убрал этот подарок. Показываю другие идеи.")
-            await show_gift_recommendations(callback, event.id, headline, recommendations, session_maker)
-            await callback.message.answer("Почему не подошёл предыдущий подарок? Это необязательно.",
+            await callback.message.answer(f"Почему не подошёл «{escape(gift.title)}»? Это необязательно.",
                 reply_markup=InlineKeyboardMarkup(inline_keyboard=[
                     [InlineKeyboardButton(text=title, callback_data=f"gift_reason:{ml_entry.id}:{reason}")]
                     for reason, title in REJECTION_REASONS.items()
                 ]))
+            await callback.message.edit_reply_markup(reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                [InlineKeyboardButton(text="⬅️ К событию", callback_data=f"show_event:{event.id}")]
+            ]))
+            await show_gift_recommendations(callback, event.id, headline, recommendations, session_maker, new_message=True)
 
 
 # =====================================================================
@@ -1961,7 +1965,7 @@ async def init_db_and_seed(engine, session_maker: async_sessionmaker):
 
 
 async def main():
-    engine = create_async_engine(DATABASE_URL, echo=False)
+    engine = create_async_engine(DATABASE_URL, echo=False, pool_pre_ping=True)
     session_maker = async_sessionmaker(engine, expire_on_commit=False, class_=AsyncSession)
 
     await init_db_and_seed(engine, session_maker)

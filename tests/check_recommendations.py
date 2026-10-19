@@ -56,6 +56,27 @@ async def main():
                     assert len(impressions) == 1 and impressions[0].budget_kzt == 10000
                     record = (await session.execute(app.select(app.GiftMLDataset))).scalars().one()
                     assert record.label == 0  # Viewing a replacement never creates a new rejection.
+                    other.budget_configured = True
+                    await session.commit()
+                    callback.message.chat.id = -456
+                    callback.message.answer = AsyncMock()
+                    callback.message.edit_reply_markup = AsyncMock()
+                    callback.answer = AsyncMock()
+                    callback.data = f'recommend_gift:{other.id}'
+                    await app.cb_recommend_gift(callback, maker)
+                    def vote_ids():
+                        sent = callback.message.answer.await_args or callback.message.edit_text.await_args
+                        keyboard = sent.kwargs['reply_markup']
+                        return [b.callback_data for row in keyboard.inline_keyboard for b in row
+                                if b.callback_data and b.callback_data.startswith('gift_fb:')]
+                    assert vote_ids() == [f'gift_fb:{other.id}:{gifts[0].id}:1', f'gift_fb:{other.id}:{gifts[0].id}:0']
+                    callback.data = f'gift_fb:{other.id}:{gifts[0].id}:0'
+                    await app.cb_gift_feedback(callback, maker)
+                    assert vote_ids() == [f'gift_fb:{other.id}:{gifts[1].id}:1', f'gift_fb:{other.id}:{gifts[1].id}:0']
+                    callback.data = f'gift_fb:{other.id}:{gifts[1].id}:0'
+                    await app.cb_gift_feedback(callback, maker)
+                    assert vote_ids() == []  # No silent recycling when candidates are exhausted.
+                    print('PASS: real callback flow: first gift -> dislike -> DIFFERENT gift -> exhausted')
                     print('PASS: shown items record position and budget without implicit dislike')
                     print('PASS: budget, unknown price exclusion, interest over gender, rejection isolation')
             finally:
