@@ -1,0 +1,30 @@
+[Unit]
+Description=Family Dates Telegram Bot
+After=network-online.target postgresql.service
+Wants=network-online.target
+Requires=postgresql.service
+StartLimitIntervalSec=300
+StartLimitBurst=10
+
+[Service]
+Type=simple
+User=familybot
+Group=familybot
+WorkingDirectory=/opt/family-dates-bot
+Environment=DATABASE_URL=postgresql+asyncpg:///family_dates_db?host=/var/run/postgresql
+Environment=DEFAULT_TIMEZONE=Asia/Almaty
+Environment=PYTHONUNBUFFERED=1
+Environment=PYTHONDONTWRITEBYTECODE=1
+LoadCredential=bot_token:/etc/family-dates-bot/token
+ExecStart=/opt/family-dates-bot/venv/bin/python /opt/family-dates-bot/deploy/run.py
+Restart=always
+RestartSec=10
+TimeoutStopSec=30
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+UMask=0077
+
+[Install]
+WantedBy=multi-user.target

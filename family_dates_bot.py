@@ -167,6 +167,8 @@ class Event(Base):
     recipient_gender: Mapped[str] = mapped_column(String(20), default="unknown")
     recipient_relation: Mapped[str] = mapped_column(String(64), default="relative")
     recipient_tags: Mapped[List[str]] = mapped_column(ARRAY(Text), default=list)
+    gift_budget_kzt: Mapped[Optional[int]] = mapped_column(Integer)
+    budget_configured: Mapped[bool] = mapped_column(Boolean, default=False, server_default="false")
     notifications_enabled: Mapped[bool] = mapped_column(Boolean, default=False)
     gift_title: Mapped[Optional[str]] = mapped_column(String(255))
     gift_url: Mapped[Optional[str]] = mapped_column(Text)
@@ -213,6 +215,7 @@ class GiftCatalog(Base):
     min_age: Mapped[int] = mapped_column(SmallInteger, default=0)
     max_age: Mapped[int] = mapped_column(SmallInteger, default=120)
     shop_url: Mapped[Optional[str]] = mapped_column(Text)
+    estimated_min_kzt: Mapped[Optional[int]] = mapped_column(Integer)
     image_url: Mapped[Optional[str]] = mapped_column(Text)
     base_score: Mapped[float] = mapped_column(Float, default=1.0)
     times_selected: Mapped[int] = mapped_column(Integer, default=0)
@@ -257,10 +260,26 @@ class GiftMLDataset(Base):
     interaction_type: Mapped[str] = mapped_column(
         String(32), nullable=False
     )  # custom_added, recommended_selected, recommended_rejected
+    rejection_reason: Mapped[Optional[str]] = mapped_column(String(32))
+    budget_kzt: Mapped[Optional[int]] = mapped_column(Integer)
     label: Mapped[int] = mapped_column(SmallInteger, nullable=False)  # 1 = positive, 0 = negative
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now()
     )
+
+
+class GiftImpression(Base):
+    __tablename__ = "gift_impressions"
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    event_id: Mapped[int] = mapped_column(BigInteger, ForeignKey("events.id", ondelete="CASCADE"))
+    user_id: Mapped[int] = mapped_column(BigInteger, ForeignKey("users.id", ondelete="CASCADE"))
+    gift_id: Mapped[int] = mapped_column(BigInteger, ForeignKey("gift_catalog.id", ondelete="CASCADE"))
+    position: Mapped[int] = mapped_column(Integer)
+    score: Mapped[float] = mapped_column(Float)
+    budget_kzt: Mapped[Optional[int]] = mapped_column(Integer)
+    recipient_tags: Mapped[List[str]] = mapped_column(ARRAY(Text), default=list)
+    algorithm: Mapped[str] = mapped_column(String(32), default="rules-v2")
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
 
 # =====================================================================
@@ -564,14 +583,9 @@ def calculate_gift_score(
     """
     score = gift.base_score
 
-    # 1. Фильтр и бонус по гендерной группе
-    if gift.target_gender == recipient_gender:
-        score += 3.0
-    elif gift.target_gender == "any":
-        score += 1.0
-    else:
-        # Не предлагаем мужские охотничьи товары в женскую группу и наоборот
-        return -999.0
+    # Gender is optional context, never a hard restriction on interests.
+    if gift.target_gender in (recipient_gender, "any"):
+        score += 0.5
 
     # 2. Совпадение по категории родства (мама, папа, друг, партнёр)
     if recipient_relation in (gift.target_relations or []):
@@ -581,14 +595,7 @@ def calculate_gift_score(
     user_tags_set = {t.lower() for t in (recipient_tags or [])}
     gift_tags_set = {t.lower() for t in (gift.tags or [])}
     overlap = user_tags_set.intersection(gift_tags_set)
-    score += len(overlap) * 2.0
-
-    # Базовые гендерные предпочтения по умолчанию (если пользователь ещё не указал много тегов):
-    # Девушкам/женщинам бустим цветы, мужчинам — охоту/снаряжение
-    if recipient_gender == "female" and "цветы" in gift_tags_set:
-        score += 1.2
-    if recipient_gender == "male" and "охота" in gift_tags_set:
-        score += 1.2
+    score += len(overlap) * 3.0
 
     # 4. Учёт юбилея
     if event_type == "jubilee" and "юбилей" in gift_tags_set:
@@ -603,7 +610,7 @@ def calculate_gift_score(
 
     # 6. Коллаборативный сигнал от выборов других пользователей (самообучение на датасете)
     # Сглаженная оценка конверсии (Laplace smoothing)
-    collaborative_boost = (gift.times_selected * 0.6) - (gift.times_rejected * 0.4)
+    collaborative_boost = min(1.0, gift.times_selected * 0.1)
     score += max(-1.5, min(4.0, collaborative_boost))
 
     # 7. Веса тегов, накопленные в gift_ml_dataset для данной гендерной группы
@@ -625,30 +632,40 @@ async def get_smart_recommendations(
     2) тегов получателя,
     3) накопленной статистики выборов всех пользователей в таблице gift_ml_dataset.
     """
-    # Загружаем накопленные веса тегов по данной гендерной группе из датасета
-    stmt_dataset = select(
-        GiftMLDataset.recipient_tags,
-        GiftMLDataset.label,
-    ).where(GiftMLDataset.recipient_gender == event.recipient_gender)
+    # Learn from tags of the rejected/selected GIFT, not all interests of its recipient.
+    stmt_dataset = select(GiftCatalog.tags, GiftMLDataset.label).join(
+        GiftMLDataset, GiftMLDataset.gift_id == GiftCatalog.id
+    ).where(GiftMLDataset.event_id == event.id,
+            GiftMLDataset.interaction_type.in_(["recommended_selected", "recommended_rejected"]),
+            (GiftMLDataset.label == 1) | (GiftMLDataset.rejection_reason == "not_interest"))
     dataset_rows = (await session.execute(stmt_dataset)).all()
-
-    community_tag_weights: Dict[str, float] = {}
+    community_tag_weights = {}
     for tags_list, label in dataset_rows:
-        delta = 0.25 if label == 1 else -0.15
-        for t in tags_list or []:
-            t_low = t.lower()
-            community_tag_weights[t_low] = community_tag_weights.get(t_low, 0.0) + delta
+        for tag in tags_list or []:
+            key = tag.lower()
+            community_tag_weights[key] = max(-3.0, min(3.0,
+                community_tag_weights.get(key, 0.0) + (0.4 if label == 1 else -0.6)))
 
     # Загружаем кандидатов из каталога
     stmt_catalog = select(GiftCatalog).where(
         GiftCatalog.is_approved.is_(True),
         GiftCatalog.created_by_user_id.is_(None),
-        GiftCatalog.target_gender.in_([event.recipient_gender, "any"]),
+        # A rejection belongs to this recipient/event, not every person of a gender.
+        ~GiftCatalog.id.in_(select(GiftMLDataset.gift_id).where(
+            GiftMLDataset.event_id == event.id,
+            GiftMLDataset.interaction_type == "recommended_rejected",
+            GiftMLDataset.gift_id.is_not(None),
+        )),
+
     )
     gifts = (await session.execute(stmt_catalog)).scalars().all()
 
     scored: List[Tuple[GiftCatalog, float]] = []
     for g in gifts:
+        if turning_age is not None and event.event_type == "birthday" and not (g.min_age <= turning_age <= g.max_age):
+            continue
+        if event.gift_budget_kzt and (g.estimated_min_kzt is None or g.estimated_min_kzt > event.gift_budget_kzt):
+            continue
         s = calculate_gift_score(
             gift=g,
             recipient_gender=event.recipient_gender,
@@ -662,7 +679,15 @@ async def get_smart_recommendations(
             scored.append((g, s))
 
     scored.sort(key=lambda item: item[1], reverse=True)
-    return scored[:limit]
+    # Prefer different categories before adding similar ideas.
+    diverse, remaining, categories = [], [], set()
+    for item in scored:
+        if item[0].category in categories:
+            remaining.append(item)
+        else:
+            diverse.append(item)
+            categories.add(item[0].category)
+    return (diverse + remaining)[:limit]
 
 
 # =====================================================================
@@ -719,11 +744,12 @@ def build_event_card_keyboard(event: Event) -> InlineKeyboardMarkup:
         ],
         [
             InlineKeyboardButton(
-                text="💡 Подобрать подарок (Умные рекомендации)",
+                text="💡 Подобрать подарок",
                 callback_data=f"recommend_gift:{event.id}",
             )
         ],
     ]
+    buttons.append([InlineKeyboardButton(text="⚙️ Интересы", callback_data=f"gift_preferences:{event.id}"), InlineKeyboardButton(text="💰 Бюджет", callback_data=f"gift_budget:{event.id}")])
     buttons.append([InlineKeyboardButton(text="🗑 Удалить событие", callback_data=f"delete_event:{event.id}")])
     buttons.append([InlineKeyboardButton(text="⬅️ Мои события", callback_data="list_my_events")])
     return InlineKeyboardMarkup(inline_keyboard=buttons)
@@ -753,34 +779,12 @@ def build_profile_selection_keyboard(
         )
     ]
 
-    # Доступные теги в зависимости от выбранной гендерной группы
-    if current_gender == "female":
-        available_tags = [
-            ("🌸 Цветы", "цветы"),
-            ("💍 Украшения", "украшения"),
-            ("🧖‍♀️ SPA и уход", "спа"),
-            ("🕯 Уют и декор", "уют"),
-            ("🍓 Сладости", "сладости"),
-            ("📱 Гаджеты", "гаджеты"),
-        ]
-    elif current_gender == "male":
-        available_tags = [
-            ("🦌 Охота", "охота"),
-            ("🎣 Рыбалка", "рыбалка"),
-            ("🔥 Гриль / Шашлык", "гриль"),
-            ("🚗 Авто", "авто"),
-            ("🛠 Инструменты", "инструменты"),
-            ("📱 Гаджеты", "гаджеты"),
-        ]
-    else:
-        available_tags = [
-            ("🌸 Цветы", "цветы"),
-            ("🦌 Охота", "охота"),
-            ("🕯 Уют и дом", "уют"),
-            ("💑 Романтика", "романтика"),
-            ("📱 Гаджеты", "гаджеты"),
-            ("🎉 Юбилей", "юбилей"),
-        ]
+    available_tags = [("Книги", "книги"), ("Игры", "игры"), ("Спорт", "спорт"),
+        ("Творчество", "творчество"), ("Музыка", "музыка"), ("Кулинария", "кулинария"),
+        ("Цветы", "цветы"), ("Украшения", "украшения"), ("SPA", "спа"),
+        ("Уют", "уют"), ("Гаджеты", "гаджеты"), ("Туризм", "туризм"),
+        ("Охота", "охота"), ("Рыбалка", "рыбалка"), ("Авто", "авто"),
+        ("Романтика", "романтика"), ("Сладости", "сладости")]
 
     tag_rows = []
     current_row = []
@@ -801,8 +805,8 @@ def build_profile_selection_keyboard(
 
     finish_row = [
         InlineKeyboardButton(
-            text="✔️ Готово — Показать карточку события",
-            callback_data=f"show_event:{event_id}",
+            text="✔️ Подобрать подарки",
+            callback_data=f"recommend_gift:{event_id}",
         )
     ]
 
@@ -878,6 +882,7 @@ def render_event_card_text(event: Event, today: Optional[date] = None) -> str:
         f"🎯 <b>Группа получателя:</b> {gender_map.get(event.recipient_gender, 'Не указана')}",
         f"🏷 <b>Теги для подбора подарка:</b> {tags_str}",
         f"🔔 <b>Уведомления:</b> {notify_status}",
+        f"💰 <b>Бюджет:</b> {str(event.gift_budget_kzt) + ' ₸' if event.gift_budget_kzt else 'без ограничения'}",
     ]
 
     if event.gift_title or event.gift_url or event.gift_photo_file_id:
@@ -1103,14 +1108,8 @@ async def process_event_date(
     title = data["title"]
     inferred = infer_profile_from_title(title)
 
-    # Автоматически проставляем стартовые теги по гендерной группе
+    # Interests are selected explicitly; gender does not imply a hobby.
     default_tags = []
-    if inferred["gender"] == "female":
-        default_tags = ["цветы"]
-    elif inferred["gender"] == "male":
-        default_tags = ["охота"]
-    elif inferred["gender"] == "couple":
-        default_tags = ["годовщина", "цветы"]
 
     async with session_maker() as session:
         user = await get_or_create_user(session, message.from_user)
@@ -1142,8 +1141,7 @@ async def process_event_date(
 
     if new_event.recipient_gender == "unknown":
         await message.answer(
-            "Чтобы я точнее подбирал подарки (например, девушкам — цветы и уход, "
-            "мужчинам — подарки из охотничьего магазина и технику), выбери группу и интересы получателя:",
+            "Выбери интересы получателя — они помогут точнее подобрать подарок:",
             reply_markup=build_profile_selection_keyboard(
                 new_event.id, new_event.recipient_gender, new_event.recipient_tags
             ),
@@ -1195,14 +1193,6 @@ async def cb_set_gender(callback: CallbackQuery, session_maker: async_sessionmak
             return
 
         event.recipient_gender = gender
-        # При смене гендерной группы добавляем базовый тег по умолчанию
-        tags = set(event.recipient_tags or [])
-        if gender == "female" and not tags:
-            tags.add("цветы")
-        elif gender == "male" and not tags:
-            tags.add("охота")
-        event.recipient_tags = list(tags)
-
         await session.commit()
         await session.refresh(event)
 
@@ -1430,6 +1420,113 @@ async def process_attached_gift(
 # =====================================================================
 
 
+EXTRA_GIFT_IDEAS = [
+    ("Книга по любимой теме", "Книги", ["книги"], 3000),
+    ("Настольная игра для компании", "Игры", ["игры", "семья"], 7000),
+    ("Пазл или набор головоломок", "Игры", ["игры", "уют"], 3000),
+    ("Скетчбук и материалы для рисования", "Творчество", ["творчество"], 4000),
+    ("Набор для приготовления любимого блюда", "Кулинария", ["кулинария"], 5000),
+    ("Чайный или кофейный набор", "Еда и напитки", ["кулинария", "уют"], 5000),
+    ("Набор любимых сладостей", "Еда и напитки", ["сладости"], 3000),
+    ("Фотоальбом с совместными воспоминаниями", "Личные подарки", ["семья", "романтика"], 4000),
+    ("Письмо и домашний ужин-сюрприз", "Личные подарки", ["романтика", "кулинария"], 2000),
+    ("Бутылка для воды или спортивное полотенце", "Спорт", ["спорт"], 3000),
+    ("Коврик для тренировок", "Спорт", ["спорт"], 6000),
+    ("Термокружка для прогулок", "Туризм", ["туризм", "отдых"], 5000),
+    ("Органайзер для автомобиля", "Авто", ["авто"], 5000),
+    ("Подставка для телефона или ноутбука", "Аксессуары", ["гаджеты"], 4000),
+    ("Плед или декоративная подушка", "Дом", ["уют", "дом"], 6000),
+    ("Комнатное растение", "Растения", ["цветы", "дом"], 4000),
+    ("Мастер-класс по интересам получателя", "Впечатления", ["творчество", "кулинария"], 12000),
+    ("Билет на концерт любимого исполнителя", "Впечатления", ["музыка"], 15000),
+]
+REJECTION_REASONS = {"expensive": "💸 Дорого", "already_have": "📦 Уже есть",
+                     "not_interest": "🙅 Не его интересы", "other": "🔄 Просто другое", "skip": "Пропустить"}
+BUDGET_OPTIONS = (5000, 10000, 20000, 50000, 100000, 0)
+
+
+def price_hint(gift):
+    return (f"ориентир от {gift.estimated_min_kzt:,} ₸".replace(",", " ")
+            if gift.estimated_min_kzt else "цену нужно уточнить")
+
+
+def budget_keyboard(event_id):
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text=(f"До {amount:,} ₸".replace(",", " ") if amount else "Без ограничения"),
+                              callback_data=f"gift_budget_set:{event_id}:{amount}")]
+        for amount in BUDGET_OPTIONS
+    ] + [[InlineKeyboardButton(text="⬅️ К событию", callback_data=f"show_event:{event_id}")]])
+
+
+async def edit_gift_message(callback, content, keyboard):
+    if callback.message.photo:
+        # Long lists do not fit Telegram photo captions. Keep the original card.
+        await callback.message.answer(content, reply_markup=keyboard, disable_web_page_preview=True)
+    else:
+        try:
+            await callback.message.edit_text(content, reply_markup=keyboard, disable_web_page_preview=True)
+        except TelegramBadRequest as exc:
+            if "message is not modified" not in exc.message.lower():
+                raise
+
+
+@router.callback_query(F.data.startswith("gift_budget:"))
+async def cb_gift_budget(callback: CallbackQuery, session_maker: async_sessionmaker):
+    event_id = int(callback.data.split(":")[1])
+    async with session_maker() as session:
+        event = await get_chat_event(session, event_id, callback.message.chat.id)
+        if event is None:
+            await callback.answer("Событие недоступно.", show_alert=True)
+            return
+    await callback.answer()
+    await edit_gift_message(callback, "Выбери максимальный бюджет в тенге. Сохраню его для этого события.", budget_keyboard(event_id))
+
+
+@router.callback_query(F.data.startswith("gift_budget_set:"))
+async def cb_set_gift_budget(callback: CallbackQuery, session_maker: async_sessionmaker):
+    _, event_id, amount = callback.data.split(":")
+    amount = int(amount)
+    if amount not in BUDGET_OPTIONS:
+        await callback.answer("Выбери сумму кнопкой.")
+        return
+    async with session_maker() as session:
+        event = await get_chat_event(session, int(event_id), callback.message.chat.id)
+        if event is None:
+            await callback.answer("Событие недоступно.", show_alert=True)
+            return
+        event.gift_budget_kzt = amount or None
+        event.budget_configured = True
+        await session.commit()
+    await cb_recommend_gift(callback, session_maker)
+
+
+@router.callback_query(F.data.startswith("gift_reason:"))
+async def cb_gift_reason(callback: CallbackQuery, session_maker: async_sessionmaker):
+    _, record_id, reason = callback.data.split(":")
+    if reason not in REJECTION_REASONS:
+        await callback.answer("Неизвестная причина.")
+        return
+    async with session_maker() as session:
+        record = (await session.execute(select(GiftMLDataset).join(Event).join(User, User.id == GiftMLDataset.user_id).where(
+            GiftMLDataset.id == int(record_id), Event.chat_id == callback.message.chat.id,
+            User.telegram_id == callback.from_user.id, GiftMLDataset.interaction_type == "recommended_rejected"
+        ).with_for_update())).scalar_one_or_none()
+        if record is None:
+            await callback.answer("Этот ответ доступен только автору отказа.", show_alert=True)
+            return
+        if record.rejection_reason:
+            await callback.answer("Причина уже сохранена.")
+            return
+        record.rejection_reason = reason
+        event_id = record.event_id
+        await session.commit()
+    await callback.answer("Учтено")
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="💰 Уменьшить бюджет", callback_data=f"gift_budget:{event_id}")]
+    ]) if reason == "expensive" else None
+    await callback.message.edit_text("Спасибо! Причина сохранена." if reason != "skip" else "Можно продолжать подбор выше.", reply_markup=kb)
+
+
 @router.callback_query(F.data.startswith("recommend_gift:"))
 async def cb_recommend_gift(
     callback: CallbackQuery, session_maker: async_sessionmaker
@@ -1441,17 +1538,9 @@ async def cb_recommend_gift(
             await callback.answer("Событие не найдено.", show_alert=True)
             return
 
-        # Если пол получателя ещё не указан, предложим сначала выбрать группу
-        if event.recipient_gender == "unknown":
-            await callback.message.edit_text(
-                "Укажи, пожалуйста, гендерную группу и интересы получателя, "
-                "чтобы я подобрал подходящие подарки (например, цветы и SPA для женщин "
-                "или товары из охотничьего магазина для мужчин):",
-                reply_markup=build_profile_selection_keyboard(
-                    event.id, event.recipient_gender, event.recipient_tags
-                ),
-            )
+        if not event.budget_configured:
             await callback.answer()
+            await edit_gift_message(callback, "Какой бюджет на подарок? Суммы в тенге.", budget_keyboard(event.id))
             return
 
         headline, turning_age = format_event_headline(
@@ -1461,39 +1550,69 @@ async def cb_recommend_gift(
             session, event, turning_age, limit=3
         )
 
+    await callback.answer()
+    await show_gift_recommendations(callback, event_id, headline, recommendations, session_maker)
+
+
+async def show_gift_recommendations(callback, event_id, headline, recommendations, session_maker=None):
     if not recommendations:
-        await callback.answer(
-            "Пока нет подходящих идей в этой категории. Попробуй изменить теги!",
-            show_alert=True,
+        await edit_gift_message(callback,
+            "Все подходящие идеи с известным ориентиром стоимости закончились.\n"
+            "Можно изменить бюджет, уточнить интересы или прикрепить свой подарок.",
+            InlineKeyboardMarkup(inline_keyboard=[
+                [InlineKeyboardButton(text="💰 Изменить бюджет", callback_data=f"gift_budget:{event_id}")],
+                [InlineKeyboardButton(text="⚙️ Уточнить интересы", callback_data=f"gift_preferences:{event_id}")],
+                [InlineKeyboardButton(text="🎁 Добавить свой подарок", callback_data=f"attach_gift:{event_id}")],
+                [InlineKeyboardButton(text="⬅️ К событию", callback_data=f"show_event:{event_id}")],
+            ]),
         )
         return
 
     lines = [
-        f"💡 <b>Подборка подарков для события «{headline}»</b>",
-        "<i>Ранжирование учитывает гендерную группу, возраст, теги и выборы других пользователей:</i>",
+        f"💡 <b>Подборка подарков для события «{escape(headline)}»</b>",
+        "<i>Учитываю интересы, бюджет и предыдущие отказы. Суммы — ориентиры для поиска, не проверенные цены магазинов.</i>",
         "",
     ]
     for idx, (gift, score) in enumerate(recommendations, start=1):
         tags_fmt = " ".join(f"#{t}" for t in (gift.tags or []))
-        url_part = f"\n   🔗 <a href='{gift.shop_url}'>Перейти в магазин</a>" if gift.shop_url else ""
+        url_part = f"\n   🔗 <a href='{escape(gift.shop_url, quote=True)}'>Перейти в магазин</a>" if gift.shop_url else ""
         lines.append(
-            f"<b>{idx}. {gift.title}</b>\n"
-            f"   📂 Категория: {gift.category} | ⭐️ Рейтинг соответствия: {score:.1f}\n"
+            f"<b>{idx}. {escape(gift.title)}</b>\n"
+            f"   📂 {escape(gift.category)} | {price_hint(gift)}\n"
             f"   🏷 {tags_fmt}{url_part}\n"
         )
 
     lines.append(
         "Нажми <b>«👍 Выбрать»</b>, чтобы прикрепить подарок к событию, "
-        "или <b>«👎 Не подходит»</b>, чтобы обучить систему подбирать точнее:"
+        "или <b>«👎 Не подходит»</b>, чтобы получить другую идею:"
     )
 
     kb = build_recommendations_keyboard(event_id, recommendations)
-    await callback.message.edit_text(
-        "\n".join(lines),
-        reply_markup=kb,
-        disable_web_page_preview=True,
-    )
+    kb.inline_keyboard.insert(0, [InlineKeyboardButton(text="💰 Бюджет", callback_data=f"gift_budget:{event_id}"), InlineKeyboardButton(text="⚙️ Интересы", callback_data=f"gift_preferences:{event_id}")])
+    await edit_gift_message(callback, "\n".join(lines), kb)
+    if session_maker:
+        async with session_maker() as session:
+            event = await get_chat_event(session, event_id, callback.message.chat.id)
+            if event:
+                user = await get_or_create_user(session, callback.from_user)
+                for position, (gift, score) in enumerate(recommendations, 1):
+                    session.add(GiftImpression(event_id=event.id, user_id=user.id, gift_id=gift.id,
+                        position=position, score=score, budget_kzt=event.gift_budget_kzt,
+                        recipient_tags=list(event.recipient_tags or [])))
+                await session.commit()
+
+
+@router.callback_query(F.data.startswith("gift_preferences:"))
+async def cb_gift_preferences(callback: CallbackQuery, session_maker: async_sessionmaker):
+    event_id = int(callback.data.split(":")[1])
+    async with session_maker() as session:
+        event = await get_chat_event(session, event_id, callback.message.chat.id)
+        if event is None:
+            await callback.answer("Событие недоступно.", show_alert=True)
+            return
+        keyboard = build_profile_selection_keyboard(event.id, event.recipient_gender, event.recipient_tags)
     await callback.answer()
+    await edit_gift_message(callback, "Укажи интересы получателя, затем вернись в карточку для подбора.", keyboard)
 
 
 @router.callback_query(F.data.startswith("gift_fb:"))
@@ -1504,12 +1623,15 @@ async def cb_gift_feedback(
     event_id = int(event_id_str)
     gift_id = int(gift_id_str)
     label = int(label_str)  # 1 = выбран, 0 = отклонён
+    if label not in (0, 1):
+        await callback.answer("Неизвестный ответ.")
+        return
 
     async with session_maker() as session:
         user = await get_or_create_user(session, callback.from_user)
         event = await get_chat_event(session, event_id, callback.message.chat.id)
         gift = await session.get(GiftCatalog, gift_id)
-        if not event or not gift:
+        if not event or not gift or gift.created_by_user_id is not None or not gift.is_approved:
             await callback.answer("Запись не найдена.", show_alert=True)
             return
 
@@ -1517,12 +1639,24 @@ async def cb_gift_feedback(
             event.title, event.event_date, event.has_birth_year
         )
 
+        await session.execute(select(Event.id).where(Event.id == event.id).with_for_update())
+        previous = (await session.execute(select(GiftMLDataset.id).where(
+            GiftMLDataset.event_id == event.id,
+            GiftMLDataset.user_id == user.id,
+            GiftMLDataset.gift_id == gift.id,
+            GiftMLDataset.label == label,
+            GiftMLDataset.interaction_type.in_(["recommended_selected", "recommended_rejected"]),
+        ).limit(1))).scalar_one_or_none()
+        if previous is not None:
+            await callback.answer("Этот ответ уже учтён. Открой подбор заново из карточки.")
+            return
+
         # 1. Обновляем счётчики коллаборативного обучения в каталоге
         if label == 1:
             gift.times_selected += 1
             event.gift_title = gift.title
-            if gift.shop_url:
-                event.gift_url = gift.shop_url
+            event.gift_url = gift.shop_url
+            event.gift_photo_file_id = None
         else:
             gift.times_rejected += 1
 
@@ -1543,6 +1677,7 @@ async def cb_gift_feedback(
                 "recommended_selected" if label == 1 else "recommended_rejected"
             ),
             label=label,
+            budget_kzt=event.gift_budget_kzt,
         )
         session.add(ml_entry)
         await session.commit()
@@ -1552,15 +1687,20 @@ async def cb_gift_feedback(
             card_text = render_event_card_text(event)
             kb = build_event_card_keyboard(event)
             await callback.message.edit_text(
-                f"🎁 Подарок <b>«{gift.title}»</b> прикреплён к событию!\n\n{card_text}",
+                f"🎁 Подарок <b>«{escape(gift.title)}»</b> прикреплён к событию!\n\n{card_text}",
                 reply_markup=kb,
             )
             await callback.answer("Подарок выбран и сохранён в событие!")
         else:
-            await callback.answer(
-                "Учтено! Модель снизила вес этого варианта для данной группы.",
-                show_alert=False,
-            )
+            recommendations = await get_smart_recommendations(session, event, turning_age, limit=3)
+            headline, _ = format_event_headline(event.title, event.event_date, event.has_birth_year)
+            await callback.answer("Убрал этот подарок. Показываю другие идеи.")
+            await show_gift_recommendations(callback, event.id, headline, recommendations, session_maker)
+            await callback.message.answer("Почему не подошёл предыдущий подарок? Это необязательно.",
+                reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                    [InlineKeyboardButton(text=title, callback_data=f"gift_reason:{ml_entry.id}:{reason}")]
+                    for reason, title in REJECTION_REASONS.items()
+                ]))
 
 
 # =====================================================================
@@ -1609,6 +1749,7 @@ async def cmd_export_dataset(message: Message, session_maker: async_sessionmaker
             "interaction_type",
             "label",
             "created_at",
+            "event_id", "gift_id", "budget_kzt", "rejection_reason",
         ]
     )
     for r in rows:
@@ -1627,6 +1768,7 @@ async def cmd_export_dataset(message: Message, session_maker: async_sessionmaker
                 r.interaction_type,
                 r.label,
                 r.created_at.isoformat() if r.created_at else "",
+                r.event_id, r.gift_id, r.budget_kzt, r.rejection_reason or "",
             ]
         )
 
@@ -1785,6 +1927,14 @@ async def init_db_and_seed(engine, session_maker: async_sessionmaker):
     """Создаёт таблицы в PostgreSQL и заполняет стартовые правила подарков, если каталог пуст."""
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
+        for statement in (
+            "ALTER TABLE events ADD COLUMN IF NOT EXISTS gift_budget_kzt INTEGER",
+            "ALTER TABLE events ADD COLUMN IF NOT EXISTS budget_configured BOOLEAN NOT NULL DEFAULT false",
+            "ALTER TABLE gift_catalog ADD COLUMN IF NOT EXISTS estimated_min_kzt INTEGER",
+            "ALTER TABLE gift_ml_dataset ADD COLUMN IF NOT EXISTS rejection_reason VARCHAR(32)",
+            "ALTER TABLE gift_ml_dataset ADD COLUMN IF NOT EXISTS budget_kzt INTEGER",
+        ):
+            await conn.execute(text(statement))
         # Upgrade existing installations without moving personal events into groups.
         await conn.execute(text("ALTER TABLE events ADD COLUMN IF NOT EXISTS chat_id BIGINT"))
         await conn.execute(text(
@@ -1795,7 +1945,14 @@ async def init_db_and_seed(engine, session_maker: async_sessionmaker):
         await conn.execute(text("CREATE INDEX IF NOT EXISTS ix_events_chat_id ON events (chat_id)"))
 
     async with session_maker() as session:
-        count = (await session.execute(select(func.count(GiftCatalog.id)))).scalar_one()
+        existing = set((await session.execute(select(GiftCatalog.title).where(GiftCatalog.created_by_user_id.is_(None)))).scalars())
+        for title, category, tags, minimum in EXTRA_GIFT_IDEAS:
+            if title not in existing:
+                session.add(GiftCatalog(title=title, category=category, tags=tags, target_gender="any",
+                    target_relations=[], min_age=0, max_age=120, base_score=2.0,
+                    estimated_min_kzt=minimum, is_approved=True))
+        await session.commit()
+        count = len(existing)
         if count == 0:
             for item in DEFAULT_GIFT_RULES:
                 session.add(GiftCatalog(**item))

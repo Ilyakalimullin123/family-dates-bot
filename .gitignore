@@ -11,3 +11,6 @@ __pycache__/
 *.backup
 *.csv
 .pytest_cache/
+
+# Local deployment credentials and database exports
+.deploy/

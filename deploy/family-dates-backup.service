@@ -1,0 +1,7 @@
+[Unit]
+Description=Back up Family Dates PostgreSQL database
+After=postgresql.service
+
+[Service]
+Type=oneshot
+ExecStart=/bin/sh /opt/family-dates-bot/deploy/backup.sh
