@@ -638,6 +638,10 @@ async def get_smart_recommendations(
     2) тегов получателя,
     3) накопленной статистики выборов всех пользователей в таблице gift_ml_dataset.
     """
+    # An implausible age is incomplete profile data, not an empty catalogue.
+    if turning_age is not None and not 0 <= turning_age <= 120:
+        turning_age = None
+
     # Learn from tags of the rejected/selected GIFT, not all interests of its recipient.
     stmt_dataset = select(GiftCatalog.tags, GiftMLDataset.label).join(
         GiftMLDataset, GiftMLDataset.gift_id == GiftCatalog.id
@@ -1577,7 +1581,13 @@ async def cb_recommend_gift(
             session, event, turning_age, limit=1
         )
 
-    await callback.answer()
+    if turning_age is not None and not 0 <= turning_age <= 120:
+        await callback.answer(
+            f"Получился возраст {turning_age} лет. Проверь год рождения в событии. Пока подбираю без учёта возраста.",
+            show_alert=True,
+        )
+    else:
+        await callback.answer()
     await show_gift_recommendations(callback, event_id, headline, recommendations, session_maker)
 
 

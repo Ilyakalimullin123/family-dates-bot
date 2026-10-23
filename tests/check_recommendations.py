@@ -40,6 +40,10 @@ async def main():
                     await session.flush()
                     result = await app.get_smart_recommendations(session, event, 26)
                     assert [g.id for g, _ in result] == [gifts[0].id, gifts[1].id]
+                    event.event_type = 'birthday'
+                    anomalous = await app.get_smart_recommendations(session, event, 126)
+                    assert [g.id for g, _ in anomalous] == [gifts[0].id, gifts[1].id]
+                    print('PASS: implausible age does not empty catalogue; budget still applies')
                     session.add(app.GiftMLDataset(user_id=user.id, event_id=event.id, gift_id=gifts[0].id,
                         recipient_gender='female', gift_title='0', interaction_type='recommended_rejected',
                         rejection_reason='already_have', label=0))
