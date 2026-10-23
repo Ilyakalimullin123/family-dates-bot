@@ -24,12 +24,15 @@ from contextvars import ContextVar
 import csv
 import io
 import logging
+import json
+from pathlib import Path
 from html import escape
 import os
 import re
 from datetime import date, datetime, timedelta
 from typing import Dict, List, Optional, Tuple
 from zoneinfo import ZoneInfo
+from urllib.parse import quote
 
 from aiogram import Bot, Dispatcher, F, Router
 from aiogram.client.default import DefaultBotProperties
@@ -217,6 +220,9 @@ class GiftCatalog(Base):
     shop_url: Mapped[Optional[str]] = mapped_column(Text)
     estimated_min_kzt: Mapped[Optional[int]] = mapped_column(Integer)
     image_url: Mapped[Optional[str]] = mapped_column(Text)
+    image_file_id: Mapped[Optional[str]] = mapped_column(Text)
+    verified_product: Mapped[bool] = mapped_column(Boolean, default=False, server_default="false")
+    price_checked_on: Mapped[Optional[date]] = mapped_column(Date)
     base_score: Mapped[float] = mapped_column(Float, default=1.0)
     times_selected: Mapped[int] = mapped_column(Integer, default=0)
     times_rejected: Mapped[int] = mapped_column(Integer, default=0)
@@ -650,6 +656,9 @@ async def get_smart_recommendations(
     stmt_catalog = select(GiftCatalog).where(
         GiftCatalog.is_approved.is_(True),
         GiftCatalog.created_by_user_id.is_(None),
+        GiftCatalog.verified_product.is_(True),
+        GiftCatalog.image_url.is_not(None),
+        GiftCatalog.shop_url.is_not(None),
         # A rejection belongs to this recipient/event, not every person of a gender.
         ~GiftCatalog.id.in_(select(GiftMLDataset.gift_id).where(
             GiftMLDataset.event_id == event.id,
@@ -815,6 +824,13 @@ def build_profile_selection_keyboard(
     )
 
 
+def marketplace_search_links(title):
+    query = quote(title, safe="")
+    return [("Kaspi", f"https://kaspi.kz/shop/search/?text={query}"),
+            ("Wildberries", f"https://www.wildberries.ru/catalog/0/search.aspx?search={query}"),
+            ("Ozon", f"https://www.ozon.ru/search/?text={query}")]
+
+
 def build_recommendations_keyboard(
     event_id: int, recommendations: List[Tuple[GiftCatalog, float]]
 ) -> InlineKeyboardMarkup:
@@ -831,9 +847,12 @@ def build_recommendations_keyboard(
                 callback_data=f"gift_fb:{event_id}:{gift.id}:0",
             ),
         ]
-        if gift.shop_url:
-            row.append(InlineKeyboardButton(text="🔗 Магазин", url=gift.shop_url))
         rows.append(row)
+        if gift.shop_url:
+            rows.append([InlineKeyboardButton(text="🛍 Открыть предложение магазина", url=gift.shop_url)])
+        if not gift.verified_product:
+            rows.extend([[InlineKeyboardButton(text=f"🔎 Найти на {name}", url=url)]
+                         for name, url in marketplace_search_links(gift.title)])
 
     rows.append(
         [
@@ -1171,7 +1190,7 @@ async def cb_toggle_notifications(
         card_text = render_event_card_text(event)
         kb = build_event_card_keyboard(event)
 
-    await callback.message.edit_text(card_text, reply_markup=kb)
+    await edit_gift_message(callback, card_text, kb)
     if event.notifications_enabled:
         await callback.answer(
             "🔔 Уведомления включены! Напомню за месяц, 3 недели, 2 недели, неделю и за 1 день в 10:00 утра.",
@@ -1272,10 +1291,7 @@ async def cb_confirm_delete_event(
         await session.commit()
     await callback.answer("Событие удалено." if deleted_id else "Событие уже удалено или недоступно.")
     await state.clear()
-    await callback.message.edit_text(
-        "✅ Событие удалено." if deleted_id else "Событие уже удалено или недоступно.",
-        reply_markup=None,
-    )
+    await edit_gift_message(callback, "✅ Событие удалено." if deleted_id else "Событие уже удалено или недоступно.", None)
     await show_events_menu(callback.message, callback.from_user, session_maker)
 
 
@@ -1295,7 +1311,15 @@ async def cb_show_event(callback: CallbackQuery, session_maker: async_sessionmak
         card_text = render_event_card_text(event)
         kb = build_event_card_keyboard(event)
 
-    await callback.message.edit_text(card_text, reply_markup=kb)
+    if event.gift_photo_file_id:
+        try:
+            await callback.message.answer_photo(
+                photo=event.gift_photo_file_id,
+                caption=f"🎁 {escape((event.gift_title or 'Выбранный подарок')[:255])}",
+            )
+        except TelegramAPIError:
+            logger.info("Фото выбранного подарка недоступно, event_id=%s", event.id)
+    await edit_gift_message(callback, card_text, kb, force_new=bool(event.gift_photo_file_id))
     await callback.answer()
 
 
@@ -1446,6 +1470,8 @@ BUDGET_OPTIONS = (5000, 10000, 20000, 50000, 100000, 0)
 
 
 def price_hint(gift):
+    if gift.price_checked_on and gift.estimated_min_kzt:
+        return f"от {gift.estimated_min_kzt:,} ₸ · проверено {gift.price_checked_on:%d.%m.%Y}".replace(",", " ")
     return (f"ориентир от {gift.estimated_min_kzt:,} ₸".replace(",", " ")
             if gift.estimated_min_kzt else "цену нужно уточнить")
 
@@ -1460,7 +1486,8 @@ def budget_keyboard(event_id):
 
 async def edit_gift_message(callback, content, keyboard, force_new=False):
     if force_new or callback.message.photo:
-        # Long lists do not fit Telegram photo captions. Keep the original card.
+        if callback.message.photo:
+            await callback.message.edit_reply_markup(reply_markup=None)
         await callback.message.answer(content, reply_markup=keyboard, disable_web_page_preview=True)
     else:
         try:
@@ -1557,7 +1584,7 @@ async def cb_recommend_gift(
 async def show_gift_recommendations(callback, event_id, headline, recommendations, session_maker=None, new_message=False):
     if not recommendations:
         await edit_gift_message(callback,
-            "Все подходящие идеи с известным ориентиром стоимости закончились.\n"
+            "Подходящие товары с фотографиями закончились.\n"
             "Можно изменить бюджет, уточнить интересы или прикрепить свой подарок.",
             InlineKeyboardMarkup(inline_keyboard=[
                 [InlineKeyboardButton(text="💰 Изменить бюджет", callback_data=f"gift_budget:{event_id}")],
@@ -1571,7 +1598,7 @@ async def show_gift_recommendations(callback, event_id, headline, recommendation
 
     lines = [
         f"💡 <b>Идея подарка для «{escape(headline)}»</b>",
-        "<i>Учитываю интересы, бюджет и предыдущие отказы. Суммы — ориентиры для поиска, не проверенные цены магазинов.</i>",
+        "<i>Цена при проверке в Алматы. Текущую цену, продавца и доставку уточни в магазине.</i>",
         "",
     ]
     for idx, (gift, score) in enumerate(recommendations, start=1):
@@ -1590,12 +1617,39 @@ async def show_gift_recommendations(callback, event_id, headline, recommendation
 
     kb = build_recommendations_keyboard(event_id, recommendations)
     kb.inline_keyboard.insert(0, [InlineKeyboardButton(text="💰 Бюджет", callback_data=f"gift_budget:{event_id}"), InlineKeyboardButton(text="⚙️ Интересы", callback_data=f"gift_preferences:{event_id}")])
-    await edit_gift_message(callback, "\n".join(lines), kb, force_new=new_message)
+    # Photo + compact caption + actions form one card (Telegram limit: 1024).
+    photo_sent = False
+    photo_file_id = None
+    if len(recommendations) == 1 and recommendations[0][0].image_url:
+        try:
+            gift = recommendations[0][0]
+            caption = (f"🎁 <b>{escape(gift.title[:255])}</b>\n"
+                       f"Для: {escape(headline[:100])}\n\n"
+                       f"{price_hint(gift)}\n"
+                       "Цена при проверке в Алматы. Уточни цену и доставку в магазине.\n\n"
+                       "👍 Сохранить к событию · 👎 Другой подарок")
+            sent_photo = await callback.message.answer_photo(
+                photo=recommendations[0][0].image_file_id or recommendations[0][0].image_url,
+                caption=caption,
+                reply_markup=kb,
+            )
+            photo_sent = True
+            if sent_photo.photo:
+                photo_file_id = sent_photo.photo[-1].file_id
+        except TelegramAPIError:
+            logger.info("Фото каталога недоступно, gift_id=%s", recommendations[0][0].id)
+    if not photo_sent:
+        if recommendations[0][0].image_url:
+            lines.append("Фото временно недоступно. Его можно посмотреть по ссылке магазина.")
+        await edit_gift_message(callback, "\n".join(lines), kb, force_new=new_message)
     if session_maker:
         async with session_maker() as session:
             event = await get_chat_event(session, event_id, callback.message.chat.id)
             if event:
                 user = await get_or_create_user(session, callback.from_user)
+                if isinstance(photo_file_id, str):
+                    await session.execute(update(GiftCatalog).where(GiftCatalog.id == recommendations[0][0].id)
+                                          .values(image_file_id=photo_file_id))
                 for position, (gift, score) in enumerate(recommendations, 1):
                     session.add(GiftImpression(event_id=event.id, user_id=user.id, gift_id=gift.id,
                         position=position, score=score, budget_kzt=event.gift_budget_kzt,
@@ -1657,7 +1711,7 @@ async def cb_gift_feedback(
             gift.times_selected += 1
             event.gift_title = gift.title
             event.gift_url = gift.shop_url
-            event.gift_photo_file_id = None
+            event.gift_photo_file_id = gift.image_file_id or gift.image_url
         else:
             gift.times_rejected += 1
 
@@ -1687,10 +1741,7 @@ async def cb_gift_feedback(
         if label == 1:
             card_text = render_event_card_text(event)
             kb = build_event_card_keyboard(event)
-            await callback.message.edit_text(
-                f"🎁 Подарок <b>«{escape(gift.title)}»</b> прикреплён к событию!\n\n{card_text}",
-                reply_markup=kb,
-            )
+            await edit_gift_message(callback, f"🎁 Подарок <b>«{escape(gift.title)}»</b> прикреплён к событию!\n\n{card_text}", kb)
             await callback.answer("Подарок выбран и сохранён в событие!")
         else:
             recommendations = await get_smart_recommendations(session, event, turning_age, limit=1)
@@ -1865,6 +1916,7 @@ async def _check_and_send_daily_notifications(
                 f"⏰ <b>Напоминание о важной дате!</b>",
                 f"Событие <b>«{headline}»</b> наступит <b>{when_str}</b> ({next_occ.strftime('%d.%m.%Y')}).",
             ]
+            reminder_photo = event.gift_photo_file_id
 
             if event.gift_title or event.gift_url:
                 text_lines.append("")
@@ -1878,6 +1930,7 @@ async def _check_and_send_daily_notifications(
                 )
                 if top_recs:
                     best_gift, _ = top_recs[0]
+                    reminder_photo = best_gift.image_file_id or best_gift.image_url
                     text_lines.append("")
                     text_lines.append(
                         f"💡 <b>Рекомендация подарка ({best_gift.category}):</b> {best_gift.title}"
@@ -1887,14 +1940,19 @@ async def _check_and_send_daily_notifications(
 
             kb = build_event_card_keyboard(event)
             try:
-                if event.gift_photo_file_id:
-                    await bot.send_photo(
-                        chat_id=event.chat_id,
-                        photo=event.gift_photo_file_id,
-                        caption="\n".join(text_lines),
-                        reply_markup=kb,
-                    )
-                else:
+                photo_delivered = False
+                if reminder_photo:
+                    try:
+                        await bot.send_photo(
+                            chat_id=event.chat_id,
+                            photo=reminder_photo,
+                            caption="\n".join(text_lines) if len("\n".join(text_lines)) <= 1024 else "🎁 Подарок к событию",
+                            reply_markup=kb if len("\n".join(text_lines)) <= 1024 else None,
+                        )
+                        photo_delivered = len("\n".join(text_lines)) <= 1024
+                    except TelegramBadRequest:
+                        logger.info("Фото недоступно; отправляю текст напоминания, event_id=%s", event.id)
+                if not photo_delivered:
                     await bot.send_message(
                         chat_id=event.chat_id,
                         text="\n".join(text_lines),
@@ -1935,6 +1993,9 @@ async def init_db_and_seed(engine, session_maker: async_sessionmaker):
             "ALTER TABLE events ADD COLUMN IF NOT EXISTS gift_budget_kzt INTEGER",
             "ALTER TABLE events ADD COLUMN IF NOT EXISTS budget_configured BOOLEAN NOT NULL DEFAULT false",
             "ALTER TABLE gift_catalog ADD COLUMN IF NOT EXISTS estimated_min_kzt INTEGER",
+            "ALTER TABLE gift_catalog ADD COLUMN IF NOT EXISTS image_file_id TEXT",
+            "ALTER TABLE gift_catalog ADD COLUMN IF NOT EXISTS verified_product BOOLEAN NOT NULL DEFAULT false",
+            "ALTER TABLE gift_catalog ADD COLUMN IF NOT EXISTS price_checked_on DATE",
             "ALTER TABLE gift_ml_dataset ADD COLUMN IF NOT EXISTS rejection_reason VARCHAR(32)",
             "ALTER TABLE gift_ml_dataset ADD COLUMN IF NOT EXISTS budget_kzt INTEGER",
         ):
@@ -1949,6 +2010,18 @@ async def init_db_and_seed(engine, session_maker: async_sessionmaker):
         await conn.execute(text("CREATE INDEX IF NOT EXISTS ix_events_chat_id ON events (chat_id)"))
 
     async with session_maker() as session:
+        product_file = Path(__file__).parent / "catalog" / "products.json"
+        if product_file.exists():
+            for item in json.loads(product_file.read_text()):
+                known = (await session.execute(select(GiftCatalog.id).where(
+                    GiftCatalog.shop_url == item["shop_url"],
+                    GiftCatalog.created_by_user_id.is_(None),
+                ).limit(1))).scalar_one_or_none()
+                if known is None:
+                    item["price_checked_on"] = date.fromisoformat(item["price_checked_on"])
+                    session.add(GiftCatalog(**item, verified_product=True, target_gender="any",
+                                           target_relations=[], base_score=2.0, is_approved=True))
+            await session.commit()
         existing = set((await session.execute(select(GiftCatalog.title).where(GiftCatalog.created_by_user_id.is_(None)))).scalars())
         for title, category, tags, minimum in EXTRA_GIFT_IDEAS:
             if title not in existing:
