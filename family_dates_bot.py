@@ -33,6 +33,8 @@ from datetime import date, datetime, timedelta
 from typing import Dict, List, Optional, Tuple
 from zoneinfo import ZoneInfo
 from urllib.parse import quote
+import growth
+import calendar_sync
 
 from aiogram import Bot, Dispatcher, F, Router
 from aiogram.client.default import DefaultBotProperties
@@ -1007,11 +1009,17 @@ async def show_events_menu(message: Message, tg_user, session_maker: async_sessi
     rows.append([InlineKeyboardButton(
         text="➕ Добавить событие", callback_data="start_add_event"
     )])
+    rows.append([InlineKeyboardButton(text="💌 Пригласить близких добавить даты", callback_data="gx_invite")])
+    rows.append([InlineKeyboardButton(text="📅 iPhone / Google Календарь", callback_data="cal_menu")])
+    if message.chat.type == "private":
+        rows.append([InlineKeyboardButton(text="🎁 Мои желания", callback_data="gx_mine")])
     name = (message.chat.title if message.chat.type in ("group", "supergroup")
             else (f"@{tg_user.username}" if tg_user.username else tg_user.first_name))
     description = (
         "События этого чата — нажми, чтобы открыть карточку."
-        if events else "Пока нет событий. Нажми ➕, чтобы добавить первую карточку."
+        if events else "Я помогу помнить важные даты и выбирать подарки.\n"
+        "Добавь первое событие, затем включи напоминания в его карточке. "
+        "Или пригласи близких: они сами укажут свои даты."
     )
     await message.answer(
         f"👤 <b>{escape(name or 'Мои события')}</b>\n\n{description}",
@@ -1024,6 +1032,9 @@ async def migrate_group(message: Message, session_maker: async_sessionmaker):
     async with session_maker() as session:
         await session.execute(update(Event).where(Event.chat_id == message.chat.id)
                               .values(chat_id=message.migrate_to_chat_id))
+        for model in (growth.Invitation, growth.Submission, calendar_sync.CalendarFeed):
+            await session.execute(update(model).where(model.chat_id == message.chat.id)
+                                  .values(chat_id=message.migrate_to_chat_id))
         await session.commit()
 
 
@@ -1069,6 +1080,9 @@ async def cmd_clean(message: Message, state: FSMContext, session_maker: async_se
 @router.message(Command("events", "menu"))
 async def cmd_start(message: Message, state: FSMContext, session_maker: async_sessionmaker):
     await state.clear()
+    if (message.text or '').split()[0].split('@')[0] == '/start':
+        if await growth_features.start(message, state, session_maker):
+            return
     await show_events_menu(message, message.from_user, session_maker)
 
 
@@ -1094,14 +1108,14 @@ async def cmd_add_event(message: Message, state: FSMContext):
     )
 
 
-@router.message(AddEventStates.waiting_for_title, F.text)
+@router.message(AddEventStates.waiting_for_title, F.text, ~F.text.startswith('/'))
 async def process_event_title(message: Message, state: FSMContext):
     if not await is_dialog_reply(message, state):
         return
     await track_dialog_message(state, message)
     title = message.text.strip()
-    if len(title) < 2:
-        await dialog_prompt(message, state,"Пожалуйста, введи более подробное название события:")
+    if not 2 <= len(title) <= 200:
+        await dialog_prompt(message, state,"Введи название события длиной от 2 до 200 символов:")
         return
 
     await state.update_data(title=title)
@@ -1114,7 +1128,7 @@ async def process_event_title(message: Message, state: FSMContext):
     )
 
 
-@router.message(AddEventStates.waiting_for_date, F.text)
+@router.message(AddEventStates.waiting_for_date, F.text, ~F.text.startswith('/'))
 async def process_event_date(
     message: Message, state: FSMContext, session_maker: async_sessionmaker
 ):
@@ -1159,6 +1173,7 @@ async def process_event_date(
         kb = build_event_card_keyboard(new_event)
 
     await message.answer(card_text, reply_markup=kb)
+    await growth.record(session_maker, message.from_user.id, 'event_created')
     await clean_dialog(message, state)
     await show_events_menu(message, message.from_user, session_maker)
 
@@ -1196,6 +1211,7 @@ async def cb_toggle_notifications(
 
     await edit_gift_message(callback, card_text, kb)
     if event.notifications_enabled:
+        await growth.record(session_maker, callback.from_user.id, 'notifications_enabled')
         await callback.answer(
             "🔔 Уведомления включены! Напомню за месяц, 3 недели, 2 недели, неделю и за 1 день в 10:00 утра.",
             show_alert=True,
@@ -1292,6 +1308,8 @@ async def cb_confirm_delete_event(
                 Event.chat_id == callback.message.chat.id,
             ).returning(Event.id)
         )).scalar_one_or_none()
+        if deleted_id:
+            await session.execute(delete(growth.Submission).where(growth.Submission.event_id == deleted_id))
         await session.commit()
     await callback.answer("Событие удалено." if deleted_id else "Событие уже удалено или недоступно.")
     await state.clear()
@@ -1349,7 +1367,7 @@ async def cb_attach_gift_prompt(callback: CallbackQuery, state: FSMContext):
     await callback.answer()
 
 
-@router.message(AttachGiftStates.waiting_for_gift_data)
+@router.message(AttachGiftStates.waiting_for_gift_data, ~F.text.startswith('/'))
 async def process_attached_gift(
     message: Message, state: FSMContext, session_maker: async_sessionmaker
 ):
@@ -1999,6 +2017,8 @@ async def init_db_and_seed(engine, session_maker: async_sessionmaker):
     """Создаёт таблицы в PostgreSQL и заполняет стартовые правила подарков, если каталог пуст."""
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
+        await conn.run_sync(growth.GrowthBase.metadata.create_all)
+        await conn.run_sync(calendar_sync.CalendarBase.metadata.create_all)
         for statement in (
             "ALTER TABLE events ADD COLUMN IF NOT EXISTS gift_budget_kzt INTEGER",
             "ALTER TABLE events ADD COLUMN IF NOT EXISTS budget_configured BOOLEAN NOT NULL DEFAULT false",
@@ -2047,6 +2067,12 @@ async def init_db_and_seed(engine, session_maker: async_sessionmaker):
             logger.info("Стартовый каталог правил подарков успешно загружен (%d позиций).", len(DEFAULT_GIFT_RULES))
 
 
+growth_features = growth.GrowthFeatures(Event, get_or_create_user, parse_user_date)
+router.include_router(growth_features.router)
+calendar_features = calendar_sync.CalendarFeatures(Event, BOT_TOKEN.split(':', 1)[0])
+router.include_router(calendar_features.router)
+
+
 async def main():
     engine = create_async_engine(DATABASE_URL, echo=False, pool_pre_ping=True)
     session_maker = async_sessionmaker(engine, expire_on_commit=False, class_=AsyncSession)
@@ -2061,28 +2087,41 @@ async def main():
     dp = Dispatcher(storage=MemoryStorage())
     dp.include_router(router)
 
-    # Настраиваем ежедневную отправку уведомлений ровно в 10:00 утра
+    # First delivery at 10:00; retry today's unsent reminders after outages.
     scheduler = AsyncIOScheduler(timezone=ZoneInfo(DEFAULT_TIMEZONE))
     scheduler.add_job(
         check_and_send_daily_notifications,
-        trigger=CronTrigger(hour=10, minute=0, timezone=ZoneInfo(DEFAULT_TIMEZONE)),
+        trigger=CronTrigger(hour="10-23", minute="0,15,30,45", timezone=ZoneInfo(DEFAULT_TIMEZONE)),
         kwargs={"bot": bot, "session_maker": session_maker},
         id="daily_10am_family_dates_notifier",
         replace_existing=True,
+        coalesce=True,
+        max_instances=1,
     )
+    if datetime.now(ZoneInfo(DEFAULT_TIMEZONE)).hour >= 10:
+        scheduler.get_job("daily_10am_family_dates_notifier").modify(next_run_time=datetime.now(ZoneInfo(DEFAULT_TIMEZONE)))
     scheduler.start()
-    logger.info("Планировщик уведомлений запущен (ежедневно в 10:00, %s).", DEFAULT_TIMEZONE)
+    logger.info("Напоминания с 10:00, повторная проверка каждые 15 минут до конца дня (%s).", DEFAULT_TIMEZONE)
 
+    calendar_runner = None
     try:
+        calendar_runner = await calendar_features.start_server(session_maker)
         await bot.set_my_commands([
             BotCommand(command="start", description="Открыть мои события"),
             BotCommand(command="new", description="➕ Добавить новую карточку"),
             BotCommand(command="events", description="Список сохранённых событий"),
+            BotCommand(command="invite", description="Пригласить близких добавить даты"),
+            BotCommand(command="wishlist", description="Мои желания и ссылка для друзей"),
+            BotCommand(command="calendar", description="Добавить даты в iPhone / Google Календарь"),
+            BotCommand(command="cancel", description="Отменить текущий ввод"),
             BotCommand(command="clean", description="🧹 Оставить актуальный список"),
         ])
         await dp.start_polling(bot, session_maker=session_maker)
     finally:
         scheduler.shutdown()
+        if calendar_runner:
+            await calendar_runner.cleanup()
+        await bot.session.close()
         await engine.dispose()
 
 

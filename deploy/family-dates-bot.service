@@ -15,6 +15,7 @@ Environment=DATABASE_URL=postgresql+asyncpg:///family_dates_db?host=/var/run/pos
 Environment=DEFAULT_TIMEZONE=Asia/Almaty
 Environment=PYTHONUNBUFFERED=1
 Environment=PYTHONDONTWRITEBYTECODE=1
+EnvironmentFile=-/etc/family-dates-bot/calendar.env
 LoadCredential=bot_token:/etc/family-dates-bot/token
 ExecStart=/opt/family-dates-bot/venv/bin/python /opt/family-dates-bot/deploy/run.py
 Restart=always
