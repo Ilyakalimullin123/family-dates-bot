@@ -249,5 +249,225 @@
     "price_checked_on": "2026-10-23",
     "min_age": 14,
     "max_age": 120
+  },
+  {
+    "title": "Дрон DJI Mini 4K серый",
+    "category": "Видео",
+    "tags": [
+      "видеосъёмка",
+      "дроны",
+      "гаджеты"
+    ],
+    "shop_url": "https://kaspi.kz/shop/p/dji-mini-4k-seryi-123591316/",
+    "image_url": "https://resources.cdn-kaspi.kz/img/m/p/hd8/ha1/87128431034398.png?format=gallery-medium",
+    "estimated_min_kzt": 229993,
+    "price_checked_on": "2026-10-29",
+    "min_age": 18,
+    "max_age": 120
+  },
+  {
+    "title": "Дрон DJI NEO серый",
+    "category": "Видео",
+    "tags": [
+      "видеосъёмка",
+      "дроны",
+      "гаджеты"
+    ],
+    "shop_url": "https://kaspi.kz/shop/p/dji-neo-seryi-123490335/",
+    "image_url": "https://resources.cdn-kaspi.kz/img/m/p/h16/h40/87102651662366.jpg?format=gallery-medium",
+    "estimated_min_kzt": 78999,
+    "price_checked_on": "2026-10-29",
+    "min_age": 18,
+    "max_age": 120
+  },
+  {
+    "title": "Петличный микрофон BOYA BY-V20, USB-C",
+    "category": "Аудио",
+    "tags": [
+      "видеосъёмка",
+      "гаджеты"
+    ],
+    "shop_url": "https://kaspi.kz/shop/p/mikrofon-boya-by-v20-chernyi-113223542/",
+    "image_url": "https://resources.cdn-kaspi.kz/img/m/p/h9f/h31/83654754533406.jpg?format=gallery-medium",
+    "estimated_min_kzt": 17078,
+    "price_checked_on": "2026-10-29",
+    "min_age": 14,
+    "max_age": 120
+  },
+  {
+    "title": "Петличный микрофон BOYA BY-V1, Lightning",
+    "category": "Аудио",
+    "tags": [
+      "видеосъёмка",
+      "гаджеты"
+    ],
+    "shop_url": "https://kaspi.kz/shop/p/mikrofon-boya-by-v1-chernyi-109268540/",
+    "image_url": "https://resources.cdn-kaspi.kz/img/m/p/p6e/p1a/107078140.jpg?format=gallery-medium",
+    "estimated_min_kzt": 15500,
+    "price_checked_on": "2026-10-29",
+    "min_age": 14,
+    "max_age": 120
+  },
+  {
+    "title": "Настольный микрофон Fifine AM8, USB/XLR, черный",
+    "category": "Аудио",
+    "tags": [
+      "видеосъёмка",
+      "пк",
+      "музыка",
+      "гаджеты"
+    ],
+    "shop_url": "https://kaspi.kz/shop/p/mikrofon-fifine-am8-chernyi-110695025/",
+    "image_url": "https://resources.cdn-kaspi.kz/img/m/p/hc8/hf5/81108035239966.jpg?format=gallery-medium",
+    "estimated_min_kzt": 27290,
+    "price_checked_on": "2026-10-29",
+    "min_age": 14,
+    "max_age": 120
+  },
+  {
+    "title": "Наушники Sony WH-CH520 черный",
+    "category": "Аудио",
+    "tags": [
+      "музыка",
+      "гаджеты"
+    ],
+    "shop_url": "https://kaspi.kz/shop/p/naushniki-sony-wh-ch520-chernyi-110665625/",
+    "image_url": "https://resources.cdn-kaspi.kz/img/m/p/h4b/hdc/81080678875166.jpg?format=gallery-medium",
+    "estimated_min_kzt": 17999,
+    "price_checked_on": "2026-10-29",
+    "min_age": 14,
+    "max_age": 120
+  },
+  {
+    "title": "Игровая гарнитура HyperX Cloud III, проводная, черный",
+    "category": "Периферия ПК",
+    "tags": [
+      "пк",
+      "игры",
+      "гаджеты"
+    ],
+    "shop_url": "https://kaspi.kz/shop/p/hyperx-cloud-iii-chernyi-111157808/",
+    "image_url": "https://resources.cdn-kaspi.kz/img/m/p/hd6/h1f/81511719763998.jpg?format=gallery-medium",
+    "estimated_min_kzt": 43989,
+    "price_checked_on": "2026-10-29",
+    "min_age": 14,
+    "max_age": 120
+  },
+  {
+    "title": "Постоянный свет Ulanzi VL49",
+    "category": "Видео",
+    "tags": [
+      "видеосъёмка",
+      "творчество",
+      "гаджеты"
+    ],
+    "shop_url": "https://kaspi.kz/shop/p/ulanzi-vl49-108220556/",
+    "image_url": "https://resources.cdn-kaspi.kz/img/m/p/paf/pc7/180845070.jpg?format=gallery-medium",
+    "estimated_min_kzt": 14990,
+    "price_checked_on": "2026-10-29",
+    "min_age": 14,
+    "max_age": 120
+  },
+  {
+    "title": "Стабилизатор для смартфона DJI Osmo Mobile 6",
+    "category": "Видео",
+    "tags": [
+      "видеосъёмка",
+      "гаджеты"
+    ],
+    "shop_url": "https://kaspi.kz/shop/p/stedikam-dji-osmo-mobile-6-106715049/",
+    "image_url": "https://resources.cdn-kaspi.kz/img/m/p/h7a/h51/64399708225566.jpg?format=gallery-medium",
+    "estimated_min_kzt": 66923,
+    "price_checked_on": "2026-10-29",
+    "min_age": 14,
+    "max_age": 120
+  },
+  {
+    "title": "Штатив Ulanzi MT-44 черный",
+    "category": "Видео",
+    "tags": [
+      "видеосъёмка",
+      "гаджеты"
+    ],
+    "shop_url": "https://kaspi.kz/shop/p/nastol-nyi-shtativ-ulanzi-mt-44-chernyi-113511500/",
+    "image_url": "https://resources.cdn-kaspi.kz/img/m/p/p53/p84/80144230.png?format=gallery-medium",
+    "estimated_min_kzt": 10987,
+    "price_checked_on": "2026-10-29",
+    "min_age": 14,
+    "max_age": 120
+  },
+  {
+    "title": "Веб-камера Logitech HD Pro Webcam C920",
+    "category": "Периферия ПК",
+    "tags": [
+      "пк",
+      "видеосъёмка",
+      "гаджеты"
+    ],
+    "shop_url": "https://kaspi.kz/shop/p/logitech-hd-pro-webcam-c920-9500040/",
+    "image_url": "https://resources.cdn-kaspi.kz/img/m/p/hd3/hc2/84205862617118.png?format=gallery-medium",
+    "estimated_min_kzt": 58984,
+    "price_checked_on": "2026-10-29",
+    "min_age": 14,
+    "max_age": 120
+  },
+  {
+    "title": "Механическая клавиатура AULA F75 белый",
+    "category": "Периферия ПК",
+    "tags": [
+      "пк",
+      "игры",
+      "гаджеты"
+    ],
+    "shop_url": "https://kaspi.kz/shop/p/aula-f75-belyi-151735893/",
+    "image_url": "https://resources.cdn-kaspi.kz/img/m/p/p8a/pf6/85124971.jpg?format=gallery-medium",
+    "estimated_min_kzt": 49105,
+    "price_checked_on": "2026-10-29",
+    "min_age": 14,
+    "max_age": 120
+  },
+  {
+    "title": "Беспроводная мышь Logitech G305 LIGHTSPEED черный",
+    "category": "Периферия ПК",
+    "tags": [
+      "пк",
+      "игры",
+      "гаджеты"
+    ],
+    "shop_url": "https://kaspi.kz/shop/p/logitech-g305-lightspeed-chernyi-135164656/",
+    "image_url": "https://resources.cdn-kaspi.kz/img/m/p/p5b/p71/26396047.png?format=gallery-medium",
+    "estimated_min_kzt": 49120,
+    "price_checked_on": "2026-10-29",
+    "min_age": 14,
+    "max_age": 120
+  },
+  {
+    "title": "Проводная мышь Logitech G102 черный",
+    "category": "Периферия ПК",
+    "tags": [
+      "пк",
+      "игры",
+      "гаджеты"
+    ],
+    "shop_url": "https://kaspi.kz/shop/p/logitech-g102-chernyi-143378355/",
+    "image_url": "https://resources.cdn-kaspi.kz/img/m/p/p53/p8c/56060739.jpg?format=gallery-medium",
+    "estimated_min_kzt": 8888,
+    "price_checked_on": "2026-10-29",
+    "min_age": 14,
+    "max_age": 120
+  },
+  {
+    "title": "USB-C хаб Ugreen CM473 (20841), 4 × USB-A",
+    "category": "Периферия ПК",
+    "tags": [
+      "пк",
+      "гаджеты"
+    ],
+    "shop_url": "https://kaspi.kz/shop/p/dok-stantsija-ugreen-cm473-20841-seryi-105626739/",
+    "image_url": "https://resources.cdn-kaspi.kz/img/m/p/p03/p19/26756873.jpg?format=gallery-medium",
+    "estimated_min_kzt": 4800,
+    "price_checked_on": "2026-10-29",
+    "min_age": 14,
+    "max_age": 120
   }
 ]
