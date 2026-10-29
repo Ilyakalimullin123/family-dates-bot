@@ -6,6 +6,11 @@ The root-owned token file is `/etc/family-dates-bot/token` (mode 600). systemd p
 
 Commands on the server:
 
+The service grants `/campaign` and `/stats` access only to Telegram user `323633544`,
+and only in a private chat, through `BOT_ADMIN_IDS` in `family-dates-bot.service`.
+After changing the unit, install it under `/etc/systemd/system/`, run
+`systemctl daemon-reload`, then restart the service.
+
 ```bash
 systemctl status family-dates-bot
 systemctl restart family-dates-bot

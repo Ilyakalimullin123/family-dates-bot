@@ -13,6 +13,7 @@ Group=familybot
 WorkingDirectory=/opt/family-dates-bot
 Environment=DATABASE_URL=postgresql+asyncpg:///family_dates_db?host=/var/run/postgresql
 Environment=DEFAULT_TIMEZONE=Asia/Almaty
+Environment=BOT_ADMIN_IDS=323633544
 Environment=PYTHONUNBUFFERED=1
 Environment=PYTHONDONTWRITEBYTECODE=1
 EnvironmentFile=-/etc/family-dates-bot/calendar.env
