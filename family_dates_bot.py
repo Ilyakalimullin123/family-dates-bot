@@ -36,7 +36,7 @@ from urllib.parse import quote
 import growth
 import calendar_sync
 
-from aiogram import Bot, Dispatcher, F, Router
+from aiogram import BaseMiddleware, Bot, Dispatcher, F, Router
 from aiogram.client.default import DefaultBotProperties
 from aiogram.client.session.middlewares.base import BaseRequestMiddleware
 from aiogram.methods import SendMessage, SendPhoto
@@ -140,6 +140,26 @@ class TrackInterfaceMessages(BaseRequestMiddleware):
             except Exception:
                 logger.exception("Не удалось зарегистрировать сообщение для /clean")
         return result
+
+
+class TrackPrivateUserMessages(BaseMiddleware):
+    """Remember incoming private messages before routing, including unhandled ones."""
+
+    def __init__(self, session_maker):
+        self.session_maker = session_maker
+
+    async def __call__(self, handler, event, data):
+        if (isinstance(event, Message) and event.chat.type == "private"
+                and event.from_user and not event.from_user.is_bot):
+            try:
+                async with self.session_maker() as session:
+                    await session.merge(InterfaceMessage(
+                        chat_id=event.chat.id, message_id=event.message_id
+                    ))
+                    await session.commit()
+            except Exception:
+                logger.exception("Не удалось зарегистрировать входящее сообщение для /clean")
+        return await handler(event, data)
 
 
 class User(Base):
@@ -2086,6 +2106,7 @@ async def main():
     )
     bot.session.middleware(TrackInterfaceMessages(session_maker))
     dp = Dispatcher(storage=MemoryStorage())
+    dp.message.outer_middleware(TrackPrivateUserMessages(session_maker))
     dp.include_router(router)
 
     # First delivery at 10:00; retry today's unsent reminders after outages.
